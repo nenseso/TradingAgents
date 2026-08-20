@@ -21,10 +21,18 @@ from urllib.request import Request, urlopen
 
 from .symbol_utils import crypto_base
 
+try:
+    from curl_cffi import requests as cffi_requests
+except ImportError:
+    cffi_requests = None
+
 logger = logging.getLogger(__name__)
 
 _API = "https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json"
-_UA = "tradingagents/0.2 (+https://github.com/TauricResearch/TradingAgents)"
+_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
 
 
 def _stocktwits_symbol(ticker: str) -> str:
@@ -47,15 +55,40 @@ def fetch_stocktwits_messages(ticker: str, limit: int = 30, timeout: float = 10.
     caller never has to special-case None or exceptions.
     """
     url = _API.format(ticker=_stocktwits_symbol(ticker))
-    req = Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
-    try:
-        with urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read())
-    except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
-        # OSError covers URLError/TimeoutError/connection resets; HTTPException
-        # covers chunked-transfer errors (IncompleteRead/BadStatusLine, #1024).
-        logger.warning("StockTwits fetch failed for %s: %s", ticker, exc)
-        return f"<stocktwits unavailable: {type(exc).__name__}>"
+    data = None
+
+    # Priority 1: curl_cffi with Chrome TLS impersonation to bypass Cloudflare WAF
+    if cffi_requests is not None:
+        try:
+            resp = cffi_requests.get(url, impersonate="chrome120", timeout=timeout)
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                except Exception:
+                    logger.warning("StockTwits returned non-JSON response (likely Cloudflare challenge HTML) for %s", ticker)
+            else:
+                logger.warning("StockTwits cffi fetch returned HTTP %s for %s", resp.status_code, ticker)
+        except Exception as exc:
+            logger.warning("StockTwits curl_cffi fetch failed for %s: %s, falling back to urllib", ticker, exc)
+    else:
+        logger.warning("curl_cffi is not installed in current Python environment; falling back to standard urllib (may trigger Cloudflare 403)")
+
+    # Priority 2: Fallback to standard urllib if curl_cffi unavailable or failed
+    if data is None:
+        headers = {
+            "User-Agent": _UA,
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        req = Request(url, headers=headers)
+        try:
+            with urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read())
+        except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
+            # OSError covers URLError/TimeoutError/connection resets; HTTPException
+            # covers chunked-transfer errors (IncompleteRead/BadStatusLine, #1024).
+            logger.warning("StockTwits fetch failed for %s: %s", ticker, exc)
+            return f"<stocktwits unavailable: {type(exc).__name__}>"
 
     messages = data.get("messages", []) if isinstance(data, dict) else []
     if not messages:
