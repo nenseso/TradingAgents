@@ -91,24 +91,60 @@ def fetch_stocktwits_messages(
     symbol has no messages, or the response shape is unexpected — the
     caller never has to special-case None or exceptions.
     """
-    url = _API.format(ticker=_stocktwits_symbol(ticker))
+    symbol = _stocktwits_symbol(ticker)
+    url = _API.format(ticker=symbol)
     data = None
 
-    # Priority 1: curl_cffi with Chrome TLS impersonation to bypass Cloudflare WAF
+    # Priority 1: curl_cffi with realistic browser headers & rotation to bypass Cloudflare WAF
     if cffi_requests is not None:
-        try:
-            resp = cffi_requests.get(url, impersonate="chrome120", timeout=timeout)
-            if resp.status_code == 200:
-                try:
-                    data = resp.json()
-                except Exception:
-                    logger.warning("StockTwits returned non-JSON response (likely Cloudflare challenge HTML) for %s", ticker)
-            else:
-                logger.warning("StockTwits cffi fetch returned HTTP %s for %s", resp.status_code, ticker)
-        except Exception as exc:
-            logger.warning("StockTwits curl_cffi fetch failed for %s: %s, falling back to urllib", ticker, exc)
+        cffi_headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Origin": "https://stocktwits.com",
+            "Referer": f"https://stocktwits.com/symbol/{symbol}",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-site",
+        }
+        for imp in ["chrome120", "chrome123", "safari17_0"]:
+            try:
+                resp = cffi_requests.get(
+                    url, impersonate=imp, headers=cffi_headers, timeout=timeout
+                )
+                if resp.status_code == 200:
+                    try:
+                        data = resp.json()
+                        break
+                    except Exception:
+                        logger.warning(
+                            "StockTwits returned non-JSON response (likely Cloudflare challenge HTML) for %s",
+                            ticker,
+                        )
+                elif resp.status_code in (403, 429):
+                    logger.warning(
+                        "StockTwits cffi fetch (%s) returned HTTP %s for %s, trying next impersonation",
+                        imp,
+                        resp.status_code,
+                        ticker,
+                    )
+                else:
+                    logger.warning(
+                        "StockTwits cffi fetch (%s) returned HTTP %s for %s",
+                        imp,
+                        resp.status_code,
+                        ticker,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "StockTwits curl_cffi fetch (%s) failed for %s: %s",
+                    imp,
+                    ticker,
+                    exc,
+                )
     else:
-        logger.warning("curl_cffi is not installed in current Python environment; falling back to standard urllib (may trigger Cloudflare 403)")
+        logger.warning(
+            "curl_cffi is not installed in current Python environment; falling back to standard urllib (may trigger Cloudflare 403)"
+        )
 
     # Priority 2: Fallback to standard urllib if curl_cffi unavailable or failed
     if data is None:
@@ -116,6 +152,7 @@ def fetch_stocktwits_messages(
             "User-Agent": _UA,
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "en-US,en;q=0.9",
+            "Referer": f"https://stocktwits.com/symbol/{symbol}",
         }
         req = Request(url, headers=headers)
         try:
