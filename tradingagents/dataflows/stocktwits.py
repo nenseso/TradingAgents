@@ -19,7 +19,7 @@ import http.client
 import json
 import logging
 from datetime import datetime
-from urllib.request import Request, urlopen
+from urllib.request import Request, getproxies, urlopen
 
 from .date_window import in_window
 from .symbol_utils import crypto_base
@@ -106,10 +106,16 @@ def fetch_stocktwits_messages(
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-site",
         }
+        # Explicitly pass system proxy so curl_cffi works even if http_proxy is not exported in shell
+        proxies = getproxies() or None
         for imp in ["chrome120", "chrome123", "safari17_0"]:
             try:
                 resp = cffi_requests.get(
-                    url, impersonate=imp, headers=cffi_headers, timeout=timeout
+                    url,
+                    impersonate=imp,
+                    headers=cffi_headers,
+                    proxies=proxies,
+                    timeout=timeout,
                 )
                 if resp.status_code == 200:
                     try:
